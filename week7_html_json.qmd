@@ -1,0 +1,172 @@
+---
+title: "Week 7: Working with HTML and JSON"
+author: "YOUR NAME HERE"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: true
+    theme: flatly
+execute:
+  echo: true
+  warning: false
+---
+
+## Introduction
+
+This week's warm-up is about two file formats that show up all over the web: HTML and JSON. I picked three data science books, typed the same information into a hand-written HTML table and a hand-written JSON file, then loaded both into R to see if they end up as the same data frame. Spoiler: not right away, but they get there with a little cleanup.
+
+## Approach
+
+First I'll pick three books on one subject and write down a title, the authors, and three extra details for each (year, publisher, ISBN). Then I'll type that same information into `books.html` and `books.json` by hand, put both on GitHub so R can reach them by URL, and read each one into its own data frame, `rvest` for the HTML and `jsonlite` for the JSON. After that I'll compare the two frames, figure out exactly where and why they differ, fix those differences, and check again whether they're identical.
+
+## The books
+
+I went with the three required texts for this course, since they're all on the same subject (doing data science in R) and I already had them on hand. All three have more than one author, which covers the "at least one book with multiple authors" rule.
+
+| Title | Authors | Year | Publisher | ISBN |
+|---|---|---|---|---|
+| R for Data Science (2nd edition) | Hadley Wickham, Mine Çetinkaya-Rundel, Garrett Grolemund | 2023 | O'Reilly Media | 978-1-492-09740-2 |
+| Text Mining with R: A Tidy Approach | Julia Silge, David Robinson | 2017 | O'Reilly Media | 978-1-491-98165-8 |
+| Feature Engineering and Selection: A Practical Approach for Predictive Models | Max Kuhn, Kjell Johnson | 2019 | Chapman & Hall/CRC | 978-1-138-07922-9 |
+
+I checked the ISBNs and authors against Open Library and the book's own website before putting them in the files.
+
+## The two files
+
+Both files are in this GitHub repository, so R can read them straight from a URL instead of from a path on my laptop.
+
+```{r setup}
+library(tidyverse)
+library(rvest)
+library(jsonlite)
+
+base_url <- "https://raw.githubusercontent.com/amine-souissi0/data607-week7/main"
+html_url <- paste0(base_url, "/books.html")
+json_url <- paste0(base_url, "/books.json")
+```
+
+Here's the HTML file, exactly as I typed it:
+
+```{r show-html}
+read_lines(html_url) |> cat(sep = "\n")
+```
+
+An HTML table is built out of rows (`<tr>`) that hold cells (`<th>` for header cells, `<td>` for data cells). Two things I had to think about while writing it:
+
+- A table cell can only hold one piece of text, so for books with several authors I put all the names in one cell separated by semicolons.
+- The `&` in "Chapman & Hall/CRC" has to be written as `&amp;` in HTML, because a bare `&` means "an entity is starting here."
+
+And the JSON file:
+
+```{r show-json}
+read_lines(json_url) |> cat(sep = "\n")
+```
+
+JSON is a list of objects, and each object is a set of `"key": value` pairs. The big difference from the HTML is that `authors` can be a real list (`["Julia Silge", "David Robinson"]`) instead of one squished-together string, and `year` is a real number (no quotes) while everything else is text.
+
+## Step 1: Load the HTML into a data frame
+
+```{r load-html}
+books_html <- read_html(html_url, encoding = "UTF-8") |>
+  html_element("table") |>
+  html_table()
+
+books_html
+```
+
+`read_html()` downloads and parses the page, `html_element("table")` grabs the table, and `html_table()` turns it into a data frame, using the `<th>` cells as the column names. I told `read_html()` the file is UTF-8 on purpose, because of the "Ç" in Çetinkaya-Rundel. Without that, some setups read it as garbled characters.
+
+## Step 2: Load the JSON into a data frame
+
+```{r load-json}
+books_json <- fromJSON(json_url)
+
+books_json
+```
+
+`fromJSON()` does it in one step. Because the file is a list of objects with the same keys, it comes back as a data frame with one row per book. The `authors` column is special though, it's a *list column*: each cell holds a whole vector of names, not just a single string.
+
+## Step 3: Compare them
+
+### First try: are they identical as loaded?
+
+```{r compare-raw}
+identical(books_html, books_json)
+```
+
+No. Here's what's different, computed straight from the two data frames:
+
+```{r why-different}
+tibble(
+  `What` = c("Column names", "Type of object", "Authors column"),
+  `HTML frame` = c(paste(names(books_html), collapse = ", "),
+                   class(books_html)[1],
+                   class(books_html$Authors)),
+  `JSON frame` = c(paste(names(books_json), collapse = ", "),
+                   class(books_json)[1],
+                   class(books_json$authors))
+) |> knitr::kable()
+```
+
+So there are three differences, and none of them is about the actual book information:
+
+1. The column names use different capitalization (`Title` vs. `title`), because I wrote them that way in the two files.
+2. One is a tibble and the other is a plain data frame.
+3. `Authors` is a single text string in the HTML frame and a list in the JSON frame.
+
+### Cleaning both frames the same way
+
+I'll write one small function and run both frames through it, so they end up in exactly the same shape:
+
+```{r normalize}
+tidy_books <- function(df) {
+  df |>
+    as_tibble() |>                                   # same type of object
+    rename_with(tolower) |>                          # same column names
+    mutate(
+      authors = map_chr(authors, \(a) paste(a, collapse = "; ")),  # list -> one string
+      year    = as.integer(year)                     # same number type
+    ) |>
+    select(title, authors, year, publisher, isbn)    # same column order
+}
+
+html_clean <- tidy_books(books_html)
+json_clean <- tidy_books(books_json)
+
+html_clean
+```
+
+The authors step works on both frames: in the JSON frame each cell is a vector of names that gets pasted together with `"; "`, and in the HTML frame each cell is already one string, so pasting it again leaves it as it was.
+
+### Second try: identical now?
+
+```{r compare-clean}
+identical(html_clean, json_clean)
+all.equal(html_clean, json_clean)
+all(html_clean == json_clean)
+
+stopifnot(nrow(html_clean) == 3, ncol(html_clean) == 5)
+stopifnot(identical(html_clean, json_clean))
+```
+
+Yes. After the cleanup, `identical()` is `TRUE`, `all.equal()` has no complaints, and every one of the 15 cells matches. The `stopifnot()` lines at the end make this report fail loudly if that ever stops being true.
+
+## Conclusions
+
+The HTML and JSON files hold the same information, but as loaded into R they are **not** identical. They only become identical once I fix the format differences: matching column names, one kind of object, and the authors turned from a list into one string.
+
+A few things stood out to me:
+
+- **HTML is flat, JSON isn't.** An HTML table cell can only hold text, so I had to squeeze multiple authors into one cell with semicolons. JSON kept them as a real list. If I wanted separate author names out of the HTML version, I'd have to split that string back apart myself and just trust that no name contains a semicolon.
+- **Types come for free in JSON, not in HTML.** In the JSON, the year is written as a number and the rest as text, and R keeps it that way. In the HTML everything starts as text, and the parser has to guess. The ISBNs stayed as text here because of their hyphens; without hyphens a parser might try to read them as one giant number.
+- **Encoding matters.** The "Ç" in one author's name is the kind of thing that quietly turns into junk characters if the file is read with the wrong encoding, which is why I set it explicitly for the HTML.
+- **Small stuff like `&amp;`.** The HTML parser turned `&amp;` back into `&` on its own, so the publisher name matched the JSON one without any work from me.
+
+For next time, this is only three books I typed myself, so the structure was friendly. Real web pages will be a lot messier, and the next two weeks cover scraping and APIs, so this was a good small-scale look at what those formats actually look like.
+
+## AI Use
+
+Anthropic. (2026). *Claude Sonnet 5.5* [Large language model]. https://claude.ai. Accessed October 10, 2026.
+
+I used Claude to help plan the comparison, draft the R code and the write-up, and to double-check the book details (ISBNs, authors) against Open Library and the book's website. I reviewed the code and can explain what each step does.
